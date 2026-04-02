@@ -18,8 +18,10 @@ type LoopConfig struct {
 	GetApiKey        func(string) (string, error)
 	GetSteering      func() ([]AgentMessage, error)
 	GetFollowUp      func() ([]AgentMessage, error)
+	SkipInitialSteeringPoll bool
 	ToolExecution    ToolExecutionMode
 	SessionID        string
+	ThinkingLevel    chonkai.ThinkingLevel
 	ThinkingBudgets  chonkai.ThinkingBudgets
 	StreamFn         StreamFn
 	Tools            []Tool
@@ -122,17 +124,17 @@ func RunAgentLoopContinue(
 ) *AgentEventStream {
 	stream := NewAgentEventStream(64)
 
+	if len(context.Messages) == 0 {
+		panic("Cannot continue: no messages in context")
+	}
+
+	lastMsg := context.Messages[len(context.Messages)-1]
+	if getMessageRole(lastMsg) == "assistant" {
+		panic("Cannot continue from message role: assistant")
+	}
+
 	go func() {
 		defer stream.Close(nil)
-
-		if len(context.Messages) == 0 {
-			return
-		}
-
-		lastMsg := context.Messages[len(context.Messages)-1]
-		if getMessageRole(lastMsg) == "assistant" {
-			return
-		}
 
 		messages, err := runLoop(ctx, nil, context, config, stream)
 		if err != nil {
@@ -154,6 +156,9 @@ func runLoop(
 ) ([]AgentMessage, error) {
 	newMessages := make([]AgentMessage, 0)
 	context.Messages = append(context.Messages, prompts...)
+	if len(prompts) > 0 {
+		newMessages = append(newMessages, prompts...)
+	}
 
 	// 发射初始事件
 	stream.Push(AgentEvent{Type: EventAgentStart})
@@ -165,7 +170,24 @@ func runLoop(
 	}
 
 	firstTurn := true
-	pendingMessages, _ := config.GetSteering()
+	getSteering := func() []AgentMessage {
+		if config.GetSteering == nil {
+			return nil
+		}
+		msgs, _ := config.GetSteering()
+		return msgs
+	}
+	getFollowUp := func() []AgentMessage {
+		if config.GetFollowUp == nil {
+			return nil
+		}
+		msgs, _ := config.GetFollowUp()
+		return msgs
+	}
+	var pendingMessages []AgentMessage
+	if !config.SkipInitialSteeringPoll {
+		pendingMessages = getSteering()
+	}
 
 	for {
 		hasMoreToolCalls := true
@@ -212,7 +234,7 @@ func runLoop(
 			hasMoreToolCalls = len(toolCalls) > 0
 
 			if hasMoreToolCalls {
-				results, err := executeToolCalls(ctx, &assistantMsg, toolCalls, config, stream)
+				results, err := executeToolCalls(ctx, &assistantMsg, toolCalls, context, config, stream)
 				if err != nil {
 					return nil, err
 				}
@@ -228,12 +250,12 @@ func runLoop(
 			stream.Push(AgentEvent{Type: EventTurnEnd, Message: msg, ToolResults: toolResults})
 
 			// 轮询转向消息
-			pendingMessages, _ = config.GetSteering()
+			pendingMessages = getSteering()
 		}
 
 		// 内层循环退出：无工具、无转向
 		// 检查 follow-up
-		followUp, _ := config.GetFollowUp()
+		followUp := getFollowUp()
 		if len(followUp) > 0 {
 			pendingMessages = followUp
 			continue
@@ -267,12 +289,21 @@ func streamAssistantResponse(
 			context.Messages = context.Messages[:savedLen]
 		}
 	}()
-	// 转换为 LLM 消息（直接使用 context.Messages，确保读取最新数据）
+	// 转换为 LLM 消息（直接使用最新数据）
+	messages := context.Messages
+	if config.TransformContext != nil {
+		transformed, err := config.TransformContext(ctx, messages)
+		if err != nil {
+			return nil, err
+		}
+		messages = transformed
+	}
+
 	var llmMessages []chonkai.Message
 	if config.ConvertToLlm != nil {
-		llmMessages = config.ConvertToLlm(context.Messages)
+		llmMessages = config.ConvertToLlm(messages)
 	} else {
-		llmMessages = convertToLLM(context.Messages)
+		llmMessages = convertToLLM(messages)
 	}
 
 	// 构建 LLM 上下文
@@ -304,7 +335,9 @@ func streamAssistantResponse(
 			APIKey:    apiKey,
 		},
 	}
-	if config.Model.Reasoning {
+	if config.ThinkingLevel != "" && config.ThinkingLevel != ThinkingOff {
+		opts.Reasoning = config.ThinkingLevel
+	} else if config.ThinkingLevel == "" && config.Model.Reasoning {
 		opts.Reasoning = chonkai.ThinkingMedium
 	}
 	if config.ThinkingBudgets.Minimal > 0 || config.ThinkingBudgets.Low > 0 ||

@@ -34,6 +34,8 @@ type Agent struct {
 	steeringQueue *MessageQueue
 	followUpQueue *MessageQueue
 	listeners     []*EventChannel
+	cbListeners   []*eventListener
+	cbSeq         int
 	activeRun     *activeRun
 }
 
@@ -48,6 +50,11 @@ type AgentState struct {
 	StreamingMessage  AgentMessage
 	InProgressToolIDs map[string]struct{}
 	ErrorMessage      string
+}
+
+type eventListener struct {
+	id int
+	fn func(AgentEvent, context.Context)
 }
 
 // activeRun 内部运行状态
@@ -65,6 +72,8 @@ func NewAgent(opts ...AgentOption) *Agent {
 			Tools:             make([]Tool, 0),
 			Messages:          make([]AgentMessage, 0),
 			InProgressToolIDs: make(map[string]struct{}),
+			Model:             defaultModel(),
+			ThinkingLevel:     ThinkingOff,
 		},
 		steeringQueue: NewMessageQueue(ModeOneAtATime),
 		followUpQueue: NewMessageQueue(ModeOneAtATime),
@@ -72,12 +81,23 @@ func NewAgent(opts ...AgentOption) *Agent {
 
 	// 默认配置
 	a.ToolExecution = ToolExecutionParallel
+	a.SteeringMode = ModeOneAtATime
+	a.FollowUpMode = ModeOneAtATime
 
 	for _, opt := range opts {
 		opt(a)
 	}
 
 	return a
+}
+
+func defaultModel() *chonkai.Model {
+	return &chonkai.Model{
+		ID:       "unknown",
+		Name:     "unknown",
+		Api:      chonkai.Api("unknown"),
+		Provider: "unknown",
+	}
 }
 
 // AgentOption Agent 配置选项
@@ -116,6 +136,20 @@ func WithMessages(messages []AgentMessage) AgentOption {
 	return func(a *Agent) {
 		a.State.Messages = append(a.State.Messages, messages...)
 	}
+}
+
+// SetTools replaces tools with a copied slice.
+func (a *Agent) SetTools(tools []Tool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.State.Tools = append([]Tool(nil), tools...)
+}
+
+// SetMessages replaces messages with a copied slice.
+func (a *Agent) SetMessages(messages []AgentMessage) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.State.Messages = append([]AgentMessage(nil), messages...)
 }
 
 // WithConvertToLlm 设置消息转换函数
@@ -194,6 +228,9 @@ func WithToolExecution(mode ToolExecutionMode) AgentOption {
 func WithSteeringMode(mode QueueMode) AgentOption {
 	return func(a *Agent) {
 		a.SteeringMode = mode
+		if a.steeringQueue != nil {
+			a.steeringQueue.mode = mode
+		}
 	}
 }
 
@@ -201,5 +238,8 @@ func WithSteeringMode(mode QueueMode) AgentOption {
 func WithFollowUpMode(mode QueueMode) AgentOption {
 	return func(a *Agent) {
 		a.FollowUpMode = mode
+		if a.followUpQueue != nil {
+			a.followUpQueue.mode = mode
+		}
 	}
 }

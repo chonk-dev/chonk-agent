@@ -47,7 +47,7 @@ func (a *Agent) Continue(ctx context.Context) error {
 	a.mu.Lock()
 	if a.activeRun != nil {
 		a.mu.Unlock()
-		return ErrAgentBusy
+		return ErrAgentBusyContinue
 	}
 
 	if len(a.State.Messages) == 0 {
@@ -60,7 +60,7 @@ func (a *Agent) Continue(ctx context.Context) error {
 		// 检查是否有 steering 消息
 		if msgs := a.steeringQueue.Drain(); len(msgs) > 0 {
 			a.mu.Unlock()
-			return a.runPrompt(ctx, msgs)
+			return a.runPromptWithOptions(ctx, msgs, true)
 		}
 
 		// 检查是否有 follow-up 消息
@@ -137,7 +137,7 @@ func (a *Agent) Reset() {
 	a.State.Messages = nil
 	a.State.IsStreaming = false
 	a.State.StreamingMessage = nil
-	a.State.InProgressToolIDs = nil
+	a.State.InProgressToolIDs = make(map[string]struct{})
 	a.State.ErrorMessage = ""
 
 	a.steeringQueue.Clear()
@@ -146,6 +146,10 @@ func (a *Agent) Reset() {
 
 // runPrompt 运行提示
 func (a *Agent) runPrompt(ctx context.Context, messages []AgentMessage) error {
+	return a.runPromptWithOptions(ctx, messages, false)
+}
+
+func (a *Agent) runPromptWithOptions(ctx context.Context, messages []AgentMessage, skipInitialSteering bool) error {
 	a.mu.Lock()
 	a.State.IsStreaming = true
 	a.mu.Unlock()
@@ -157,7 +161,7 @@ func (a *Agent) runPrompt(ctx context.Context, messages []AgentMessage) error {
 		a.mu.Unlock()
 	}()
 
-	stream := RunAgentLoop(ctx, messages, a.createContext(), a.createLoopConfig())
+	stream := RunAgentLoop(ctx, messages, a.createContext(), a.createLoopConfig(skipInitialSteering))
 	return a.consumeStream(stream)
 }
 
@@ -174,7 +178,7 @@ func (a *Agent) runContinuation(ctx context.Context) error {
 		a.mu.Unlock()
 	}()
 
-	stream := RunAgentLoopContinue(ctx, a.createContext(), a.createLoopConfig())
+	stream := RunAgentLoopContinue(ctx, a.createContext(), a.createLoopConfig(false))
 	return a.consumeStream(stream)
 }
 
@@ -192,6 +196,12 @@ func (a *Agent) consumeStream(stream *AgentEventStream) error {
 // processEvent 处理单个事件
 func (a *Agent) processEvent(event AgentEvent) {
 	a.mu.Lock()
+	runCtx := context.Background()
+	if a.activeRun != nil {
+		runCtx = a.activeRun.ctx
+	}
+	listeners := make([]*eventListener, len(a.cbListeners))
+	copy(listeners, a.cbListeners)
 
 	switch event.Type {
 	case EventMessageStart, EventMessageUpdate:
@@ -217,6 +227,9 @@ func (a *Agent) processEvent(event AgentEvent) {
 
 	// 广播给订阅者
 	a.emit(event)
+	for _, l := range listeners {
+		l.fn(event, runCtx)
+	}
 }
 
 // createContext 创建上下文快照
@@ -232,21 +245,23 @@ func (a *Agent) createContext() AgentContext {
 }
 
 // createLoopConfig 创建循环配置
-func (a *Agent) createLoopConfig() LoopConfig {
+func (a *Agent) createLoopConfig(skipInitialSteering bool) LoopConfig {
 	return LoopConfig{
-		Model:            a.State.Model,
-		ConvertToLlm:     a.ConvertToLlm,
-		TransformContext: a.TransformContext,
-		BeforeToolCall:   a.BeforeToolCall,
-		AfterToolCall:    a.AfterToolCall,
-		GetApiKey:        a.GetApiKey,
-		GetSteering:      a.getSteeringMessages,
-		GetFollowUp:      a.getFollowUpMessages,
-		ToolExecution:    a.ToolExecution,
-		SessionID:        a.SessionID,
-		ThinkingBudgets:  a.ThinkingBudgets,
-		StreamFn:         a.StreamFn,
-		Tools:            a.State.Tools,
+		Model:                   a.State.Model,
+		ConvertToLlm:            a.ConvertToLlm,
+		TransformContext:        a.TransformContext,
+		BeforeToolCall:          a.BeforeToolCall,
+		AfterToolCall:           a.AfterToolCall,
+		GetApiKey:               a.GetApiKey,
+		GetSteering:             a.getSteeringMessages,
+		GetFollowUp:             a.getFollowUpMessages,
+		SkipInitialSteeringPoll: skipInitialSteering,
+		ToolExecution:           a.ToolExecution,
+		SessionID:               a.SessionID,
+		ThinkingLevel:           a.State.ThinkingLevel,
+		ThinkingBudgets:         a.ThinkingBudgets,
+		StreamFn:                a.StreamFn,
+		Tools:                   a.State.Tools,
 	}
 }
 
@@ -279,6 +294,30 @@ func (a *Agent) Subscribe() *EventChannel {
 	a.mu.Unlock()
 
 	return ec
+}
+
+// SubscribeFunc 订阅事件回调，返回取消订阅函数。
+// 回调按订阅顺序同步执行，属于运行生命周期的一部分。
+func (a *Agent) SubscribeFunc(fn func(AgentEvent, context.Context)) func() {
+	if fn == nil {
+		return func() {}
+	}
+	a.mu.Lock()
+	id := a.cbSeq
+	a.cbSeq++
+	a.cbListeners = append(a.cbListeners, &eventListener{id: id, fn: fn})
+	a.mu.Unlock()
+
+	return func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		for i, l := range a.cbListeners {
+			if l.id == id {
+				a.cbListeners = append(a.cbListeners[:i], a.cbListeners[i+1:]...)
+				return
+			}
+		}
+	}
 }
 
 // Unsubscribe 取消订阅并关闭对应的 EventChannel

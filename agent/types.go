@@ -8,8 +8,8 @@ import (
 	chonkai "github.com/chonk-dev/chonk-ai"
 )
 
-// AgentMessage 是 Agent 系统的消息类型（直接使用 chonkai.Message 接口）
-type AgentMessage = chonkai.Message
+// AgentMessage 是 Agent 系统的消息类型（允许自定义消息结构）
+type AgentMessage = any
 
 // AssistantMessage 助手消息（使用具体类型）
 type AssistantMessage = chonkai.AssistantMessage
@@ -141,6 +141,9 @@ const (
 	ToolExecutionParallel   ToolExecutionMode = "parallel"
 	ToolExecutionSequential ToolExecutionMode = "sequential"
 )
+
+// ThinkingOff disables reasoning effort.
+const ThinkingOff chonkai.ThinkingLevel = "off"
 
 // QueueMode 队列模式
 type QueueMode string

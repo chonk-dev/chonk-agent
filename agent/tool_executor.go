@@ -14,13 +14,19 @@ func executeToolCalls(
 	ctx context.Context,
 	assistant *AssistantMessage,
 	toolCalls []chonkai.ToolCall,
+	context AgentContext,
 	config LoopConfig,
 	stream *AgentEventStream,
 ) ([]chonkai.ToolResultMessage, error) {
-	if config.ToolExecution == ToolExecutionSequential {
-		return executeToolCallsSequential(ctx, assistant, toolCalls, config, stream)
+	contextSnapshot := AgentContext{
+		SystemPrompt: context.SystemPrompt,
+		Messages:     append([]AgentMessage(nil), context.Messages...),
+		Tools:        append([]Tool(nil), context.Tools...),
 	}
-	return executeToolCallsParallel(ctx, assistant, toolCalls, config, stream)
+	if config.ToolExecution == ToolExecutionSequential {
+		return executeToolCallsSequential(ctx, assistant, toolCalls, contextSnapshot, config, stream)
+	}
+	return executeToolCallsParallel(ctx, assistant, toolCalls, contextSnapshot, config, stream)
 }
 
 // preparedCall 工具准备阶段的成功结果
@@ -37,6 +43,7 @@ func prepareToolCall(
 	ctx context.Context,
 	assistant *AssistantMessage,
 	tc chonkai.ToolCall,
+	context AgentContext,
 	config LoopConfig,
 	stream *AgentEventStream,
 ) (preparedCall, *chonkai.ToolResultMessage) {
@@ -55,10 +62,14 @@ func prepareToolCall(
 	}
 
 	// 查找工具（通过索引取指针，避免 loop-variable 逃逸）
+	toolSet := context.Tools
+	if len(toolSet) == 0 {
+		toolSet = config.Tools
+	}
 	var foundTool *Tool
-	for i := range config.Tools {
-		if config.Tools[i].Name == tc.Name {
-			foundTool = &config.Tools[i]
+	for i := range toolSet {
+		if toolSet[i].Name == tc.Name {
+			foundTool = &toolSet[i]
 			break
 		}
 	}
@@ -103,6 +114,7 @@ func prepareToolCall(
 			AssistantMessage: *assistant,
 			ToolCall:         tc,
 			Args:             args,
+			Context:          context,
 		})
 		if err != nil {
 			return fail(tc, "BeforeToolCall error: "+err.Error(), stream)
@@ -119,17 +131,13 @@ func prepareToolCall(
 	return preparedCall{tc: tc, tool: foundTool, args: args}, nil
 }
 
-// runAndFinalizeToolCall 执行阶段 + 后处理：execute → 填充 Meta → afterHook → 构建结果
-func runAndFinalizeToolCall(
+// executePreparedToolCall 执行工具并返回原始结果（不发 end/message 事件）
+func executePreparedToolCall(
 	ctx context.Context,
-	assistant *AssistantMessage,
 	p preparedCall,
-	config LoopConfig,
 	stream *AgentEventStream,
-) chonkai.ToolResultMessage {
+) (ToolResult, error) {
 	tc, tool, args := p.tc, p.tool, p.args
-
-	// 执行工具
 	toolResult, execErr := tool.Execute(ctx, tc.ID, args, func(partial ToolResult) {
 		stream.Push(AgentEvent{
 			Type:       EventToolExecutionUpdate,
@@ -138,10 +146,27 @@ func runAndFinalizeToolCall(
 			ToolResult: &partial,
 		})
 	})
+	return toolResult, execErr
+}
+
+// finalizeToolCall 后处理：填充 Meta → afterHook → 构建结果并发事件
+func finalizeToolCall(
+	ctx context.Context,
+	assistant *AssistantMessage,
+	p preparedCall,
+	toolResult ToolResult,
+	execErr error,
+	context AgentContext,
+	config LoopConfig,
+	stream *AgentEventStream,
+) chonkai.ToolResultMessage {
+	tc, tool, args := p.tc, p.tool, p.args
 
 	if execErr != nil {
-		r := createErrorToolResult(tc.ID, tc.Name, "Tool execution error: "+execErr.Error())
-		emitToolEnd(stream, tc.ID, tc.Name, true)
+		errResult := errorToolResult("Tool execution error: " + execErr.Error())
+		r := buildToolResultMessage(tc.ID, tc.Name, errResult, true)
+		emitToolEnd(stream, tc.ID, tc.Name, true, &errResult)
+		emitToolMessage(stream, r)
 		return r
 	}
 
@@ -165,6 +190,7 @@ func runAndFinalizeToolCall(
 			Args:             args,
 			Result:           toolResult,
 			IsError:          isError,
+			Context:          context,
 		})
 		if err == nil && afterResult != nil {
 			if afterResult.Content != nil {
@@ -179,14 +205,9 @@ func runAndFinalizeToolCall(
 		}
 	}
 
-	r := chonkai.ToolResultMessage{
-		ToolCallID: tc.ID,
-		ToolName:   tc.Name,
-		Content:    toolResult.Content,
-		IsError:    isError,
-		Timestamp:  time.Now(),
-	}
-	emitToolEnd(stream, tc.ID, tc.Name, isError)
+	r := buildToolResultMessage(tc.ID, tc.Name, toolResult, isError)
+	emitToolEnd(stream, tc.ID, tc.Name, isError, &toolResult)
+	emitToolMessage(stream, r)
 	return r
 }
 
@@ -195,17 +216,19 @@ func executeToolCallsSequential(
 	ctx context.Context,
 	assistant *AssistantMessage,
 	toolCalls []chonkai.ToolCall,
+	context AgentContext,
 	config LoopConfig,
 	stream *AgentEventStream,
 ) ([]chonkai.ToolResultMessage, error) {
 	results := make([]chonkai.ToolResultMessage, 0, len(toolCalls))
 	for _, tc := range toolCalls {
-		prepared, errResult := prepareToolCall(ctx, assistant, tc, config, stream)
+		prepared, errResult := prepareToolCall(ctx, assistant, tc, context, config, stream)
 		if errResult != nil {
 			results = append(results, *errResult)
 			continue
 		}
-		results = append(results, runAndFinalizeToolCall(ctx, assistant, prepared, config, stream))
+		toolResult, execErr := executePreparedToolCall(ctx, prepared, stream)
+		results = append(results, finalizeToolCall(ctx, assistant, prepared, toolResult, execErr, context, config, stream))
 	}
 	return results, nil
 }
@@ -215,31 +238,60 @@ func executeToolCallsParallel(
 	ctx context.Context,
 	assistant *AssistantMessage,
 	toolCalls []chonkai.ToolCall,
+	context AgentContext,
 	config LoopConfig,
 	stream *AgentEventStream,
 ) ([]chonkai.ToolResultMessage, error) {
 	results := make([]chonkai.ToolResultMessage, len(toolCalls))
-	var wg sync.WaitGroup
+	prepared := make([]*preparedCall, len(toolCalls))
+	outcomes := make([]struct {
+		result ToolResult
+		err    error
+	}, len(toolCalls))
 
 	for i, tc := range toolCalls {
+		p, errResult := prepareToolCall(ctx, assistant, tc, context, config, stream)
+		if errResult != nil {
+			results[i] = *errResult
+			continue
+		}
+		prepared[i] = &p
+	}
+
+	var wg sync.WaitGroup
+	for i, p := range prepared {
+		if p == nil {
+			continue
+		}
+		idx := i
+		call := *p
 		wg.Go(func() {
-			prepared, errResult := prepareToolCall(ctx, assistant, tc, config, stream)
-			if errResult != nil {
-				results[i] = *errResult
-				return
-			}
-			results[i] = runAndFinalizeToolCall(ctx, assistant, prepared, config, stream)
+			result, execErr := executePreparedToolCall(ctx, call, stream)
+			outcomes[idx] = struct {
+				result ToolResult
+				err    error
+			}{result: result, err: execErr}
 		})
 	}
 
 	wg.Wait()
+
+	for i, p := range prepared {
+		if p == nil {
+			continue
+		}
+		outcome := outcomes[i]
+		results[i] = finalizeToolCall(ctx, assistant, *p, outcome.result, outcome.err, context, config, stream)
+	}
 	return results, nil
 }
 
 // fail 创建错误结果并发出 end 事件，供 prepareToolCall 内部使用
 func fail(tc chonkai.ToolCall, msg string, stream *AgentEventStream) (preparedCall, *chonkai.ToolResultMessage) {
-	r := createErrorToolResult(tc.ID, tc.Name, msg)
-	emitToolEnd(stream, tc.ID, tc.Name, true)
+	errResult := errorToolResult(msg)
+	r := buildToolResultMessage(tc.ID, tc.Name, errResult, true)
+	emitToolEnd(stream, tc.ID, tc.Name, true, &errResult)
+	emitToolMessage(stream, r)
 	return preparedCall{}, &r
 }
 
@@ -255,20 +307,37 @@ func parseToolArgs(raw json.RawMessage) (map[string]any, error) {
 	return args, nil
 }
 
-// createErrorToolResult 创建错误工具结果
-func createErrorToolResult(toolCallID, toolName, errMsg string) chonkai.ToolResultMessage {
-	return chonkai.ToolResultMessage{
-		ToolCallID: toolCallID,
-		ToolName:   toolName,
+// errorToolResult 创建错误工具结果
+func errorToolResult(errMsg string) ToolResult {
+	return ToolResult{
 		Content: []UserContent{
 			TextContent{Type: "text", Text: errMsg},
 		},
-		IsError:   true,
-		Timestamp: time.Now(),
+	}
+}
+
+func buildToolResultMessage(toolCallID, toolName string, result ToolResult, isError bool) chonkai.ToolResultMessage {
+	return chonkai.ToolResultMessage{
+		ToolCallID: toolCallID,
+		ToolName:   toolName,
+		Content:    result.Content,
+		IsError:    isError,
+		Timestamp:  time.Now(),
 	}
 }
 
 // emitToolEnd 发射工具结束事件
-func emitToolEnd(stream *AgentEventStream, toolCallID, toolName string, isError bool) {
-	stream.Push(AgentEvent{Type: EventToolExecutionEnd, ToolCallID: toolCallID, ToolName: toolName, ToolIsError: isError})
+func emitToolEnd(stream *AgentEventStream, toolCallID, toolName string, isError bool, result *ToolResult) {
+	stream.Push(AgentEvent{
+		Type:        EventToolExecutionEnd,
+		ToolCallID:  toolCallID,
+		ToolName:    toolName,
+		ToolIsError: isError,
+		ToolResult:  result,
+	})
+}
+
+func emitToolMessage(stream *AgentEventStream, msg chonkai.ToolResultMessage) {
+	stream.Push(AgentEvent{Type: EventMessageStart, Message: msg})
+	stream.Push(AgentEvent{Type: EventMessageEnd, Message: msg})
 }
