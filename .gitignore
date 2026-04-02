@@ -1,6 +1,7 @@
 # Claude configuration
 .claude/
 
-# Markdown files (except README.md)
+# Markdown files (except README files)
 *.md
 !README.md
+!README_zh.md

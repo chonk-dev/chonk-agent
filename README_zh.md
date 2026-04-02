@@ -1,37 +1,37 @@
 # chonk-agent
 
-A general-purpose Agent runtime library built on [chonk-ai](https://github.com/chonk-dev/chonk-ai).
+基于 [chonk-ai](https://github.com/chonk-dev/chonk-ai) 构建的通用 Agent 运行时库。
 
 [![Go Version](https://img.shields.io/badge/go-1.23+-blue.svg)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**[中文文档](README_zh.md)**
+**[English](README.md)**
 
 ---
 
-## Features
+## 特性
 
-- **Complete Agent runtime** — state management, event system, message queue
-- **Tool call system** — `beforeToolCall` / `afterToolCall` hooks for full control
-- **Streaming events** — modern Go design with channels and `iter.Seq`
-- **Message queues** — Steering (interrupt) and Follow-up (queue) support
-- **Background task management** — long-running tasks executed in background
+- **完整的 Agent 运行时** — 状态管理、事件系统、消息队列
+- **工具调用系统** — `beforeToolCall` / `afterToolCall` 钩子，完整掌控工具执行
+- **流式事件处理** — 基于 channel 和 `iter.Seq` 的现代 Go 设计
+- **消息队列** — Steering（中断注入）和 Follow-up（排队等待）支持
+- **后台任务管理** — 长时间任务后台执行
 
 ---
 
-## Installation
+## 安装
 
 ```bash
 go get github.com/chonk-dev/chonk-agent/agent
 ```
 
-**Requirements**: Go 1.23+, [chonk-ai](https://github.com/chonk-dev/chonk-ai)
+**依赖**: Go 1.23+，[chonk-ai](https://github.com/chonk-dev/chonk-ai)
 
 ---
 
-## Quick Start
+## 快速开始
 
-### 1. Basic conversation
+### 1. 基础对话
 
 ```go
 model := &chonkai.Model{
@@ -60,11 +60,11 @@ a.Prompt(ctx, chonkai.UserMessage{RawText: "Hello!"})
 a.WaitIdle(ctx)
 ```
 
-### 2. Tool calls
+### 2. 工具调用
 
 ```go
 type WeatherParams struct {
-    City string `json:"city" jsonschema:"City name"`
+    City string `json:"city" jsonschema:"城市名称"`
 }
 
 weatherTool := agent.NewTool(
@@ -76,7 +76,7 @@ weatherTool := agent.NewTool(
         city := params["city"].(string)
         return agent.ToolResult{
             Content: []chonkai.UserContent{
-                chonkai.TextContent{Type: "text", Text: fmt.Sprintf("25°C in %s", city)},
+                chonkai.TextContent{Type: "text", Text: fmt.Sprintf("%s 当前 25°C", city)},
             },
         }, nil
     },
@@ -90,11 +90,11 @@ a := agent.NewAgent(
     agent.WithAPIKey("sk-..."),
 )
 
-a.Prompt(ctx, chonkai.UserMessage{RawText: "What's the weather in Beijing?"})
+a.Prompt(ctx, chonkai.UserMessage{RawText: "北京现在天气怎么样？"})
 a.WaitIdle(ctx)
 ```
 
-### 3. beforeToolCall hook (block execution)
+### 3. beforeToolCall 钩子（阻止工具执行）
 
 ```go
 a := agent.NewAgent(
@@ -104,18 +104,19 @@ a := agent.NewAgent(
     agent.WithBeforeToolCall(func(ctx context.Context,
         bctx agent.BeforeToolCallContext) (*agent.BeforeToolCallResult, error) {
 
+        // 阻止所有 bash 命令
         if bctx.ToolCall.Name == "bash" {
             return &agent.BeforeToolCallResult{
                 Block:  true,
                 Reason: "bash is disabled for security",
             }, nil
         }
-        return nil, nil // allow
+        return nil, nil // 允许执行
     }),
 )
 ```
 
-### 4. afterToolCall hook (modify result)
+### 4. afterToolCall 钩子（修改工具结果）
 
 ```go
 a := agent.NewAgent(
@@ -125,8 +126,10 @@ a := agent.NewAgent(
     agent.WithAfterToolCall(func(ctx context.Context,
         actx agent.AfterToolCallContext) (*agent.AfterToolCallResult, error) {
 
+        // 记录审计日志
         logAudit(actx.ToolCall.Name, actx.Args)
 
+        // 修改返回结果
         return &agent.AfterToolCallResult{
             Details: map[string]any{
                 "original":  actx.Result.Details,
@@ -138,7 +141,7 @@ a := agent.NewAgent(
 )
 ```
 
-### 5. Steering and Follow-up
+### 5. Steering 和 Follow-up
 
 ```go
 a := agent.NewAgent(
@@ -147,23 +150,23 @@ a := agent.NewAgent(
     agent.WithAPIKey("sk-..."),
 )
 
-go a.Prompt(ctx, chonkai.UserMessage{RawText: "Read config.json"})
+go a.Prompt(ctx, chonkai.UserMessage{RawText: "读取 config.json"})
 
-// Interrupt mid-execution
+// 中途注入（立即打断当前执行）
 time.Sleep(500 * time.Millisecond)
-a.Steer(chonkai.UserMessage{RawText: "Stop! Don't read it."})
+a.Steer(chonkai.UserMessage{RawText: "停！不要读它。"})
 
-// Queue a follow-up after the current task
-a.FollowUp(chonkai.UserMessage{RawText: "Check package.json instead"})
+// 完成后继续（排队等待当前任务结束）
+a.FollowUp(chonkai.UserMessage{RawText: "改为检查 package.json"})
 
 a.WaitIdle(ctx)
 ```
 
 ---
 
-## API Reference
+## API 参考
 
-### Creating an agent
+### 创建 Agent
 
 ```go
 a := agent.NewAgent(
@@ -178,33 +181,33 @@ a := agent.NewAgent(
 )
 ```
 
-### State access
+### 状态访问
 
 ```go
-prompt   := a.State.SystemPrompt
-messages := a.State.Messages
+prompt    := a.State.SystemPrompt
+messages  := a.State.Messages
 streaming := a.State.IsStreaming
 
-// Modify
-a.State.SystemPrompt = "new prompt"
+// 修改
+a.State.SystemPrompt = "新的提示词"
 a.State.Tools = append(a.State.Tools, newTool)
 ```
 
-### Run control
+### 运行控制
 
 ```go
-a.Prompt(ctx, chonkai.UserMessage{RawText: "Hello"})  // start
-a.Continue(ctx)                                         // continue
-a.WaitIdle(ctx)                                         // wait until idle
-a.Abort()                                               // abort current run
-a.Reset()                                               // reset state
+a.Prompt(ctx, chonkai.UserMessage{RawText: "Hello"})  // 开始对话
+a.Continue(ctx)                                         // 继续执行
+a.WaitIdle(ctx)                                         // 等待空闲
+a.Abort()                                               // 中止当前运行
+a.Reset()                                               // 重置状态
 ```
 
-### Message queues
+### 消息队列
 
 ```go
-a.Steer(chonkai.UserMessage{RawText: "change direction"})    // interrupt
-a.FollowUp(chonkai.UserMessage{RawText: "then do this"})     // queue
+a.Steer(chonkai.UserMessage{RawText: "换个方向"})     // 中断注入
+a.FollowUp(chonkai.UserMessage{RawText: "然后做这个"}) // 排队等待
 
 a.ClearSteeringQueue()
 a.ClearFollowUpQueue()
@@ -213,7 +216,7 @@ a.ClearAllQueues()
 if a.HasQueuedMessages() { ... }
 ```
 
-### Event subscription
+### 事件订阅
 
 ```go
 events := a.Subscribe()
@@ -221,41 +224,41 @@ defer events.Close()
 
 for event := range events.Events() {
     switch event.Type {
-    case agent.EventAgentStart:
-    case agent.EventAgentEnd:
-    case agent.EventTurnStart:
-    case agent.EventTurnEnd:
-    case agent.EventMessageUpdate:
+    case agent.EventAgentStart:       // Agent 开始运行
+    case agent.EventAgentEnd:         // Agent 完成
+    case agent.EventTurnStart:        // 新 turn 开始
+    case agent.EventTurnEnd:          // turn 结束
+    case agent.EventMessageUpdate:    // 流式文本增量
         fmt.Print(event.AssistantEvent.Delta)
     case agent.EventToolExecutionStart:
-        fmt.Printf("Tool: %s args: %v\n", event.ToolName, event.ToolArgs)
+        fmt.Printf("工具: %s 参数: %v\n", event.ToolName, event.ToolArgs)
     case agent.EventToolExecutionUpdate:
-        fmt.Printf("Progress: %v\n", event.ToolResult)
+        fmt.Printf("进度: %v\n", event.ToolResult)
     case agent.EventToolExecutionEnd:
-        fmt.Printf("Done, isError: %v\n", event.ToolIsError)
+        fmt.Printf("完成，isError: %v\n", event.ToolIsError)
     }
 }
 ```
 
 ---
 
-## Project Structure
+## 项目结构
 
 ```
 chonk-agent/
 ├── agent/
-│   ├── agent.go              # Agent struct and options
-│   ├── types.go              # Context and result types
-│   ├── event.go              # AgentEvent definitions
-│   ├── event_channel.go      # EventChannel subscription
-│   ├── loop.go               # Core agent loop
-│   ├── run.go                # Run control (Prompt/Continue/Abort)
-│   ├── queue.go              # MessageQueue (Steering/Follow-up)
-│   ├── tool.go               # Tool definition
-│   ├── tool_executor.go      # Tool execution with hook support
-│   ├── background_tasks.go   # Background task management
-│   ├── stream.go             # StreamFn definition
-│   └── errors.go             # Error types
+│   ├── agent.go              # Agent 结构体与选项
+│   ├── types.go              # Context 和 Result 类型
+│   ├── event.go              # AgentEvent 定义
+│   ├── event_channel.go      # EventChannel 订阅
+│   ├── loop.go               # Agent Loop 核心
+│   ├── run.go                # 运行控制（Prompt/Continue/Abort）
+│   ├── queue.go              # MessageQueue（Steering/Follow-up）
+│   ├── tool.go               # Tool 定义
+│   ├── tool_executor.go      # 工具执行（含钩子支持）
+│   ├── background_tasks.go   # 后台任务管理
+│   ├── stream.go             # StreamFn 定义
+│   └── errors.go             # 错误类型
 ├── examples/
 │   └── basic/
 │       └── main.go
@@ -265,6 +268,6 @@ chonk-agent/
 
 ---
 
-## License
+## 许可证
 
 MIT
