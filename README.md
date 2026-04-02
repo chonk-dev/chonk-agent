@@ -2,7 +2,7 @@
 
 A general-purpose Agent runtime library built on [chonk-ai](https://github.com/chonk-dev/chonk-ai).
 
-[![Go Version](https://img.shields.io/badge/go-1.23+-blue.svg)](https://go.dev)
+[![Go Version](https://img.shields.io/badge/go-1.26+-blue.svg)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **[中文文档](README_zh.md)**
@@ -25,7 +25,7 @@ A general-purpose Agent runtime library built on [chonk-ai](https://github.com/c
 go get github.com/chonk-dev/chonk-agent/agent
 ```
 
-**Requirements**: Go 1.23+, [chonk-ai](https://github.com/chonk-dev/chonk-ai)
+**Requirements**: Go 1.26+, [chonk-ai](https://github.com/chonk-dev/chonk-ai)
 
 ---
 

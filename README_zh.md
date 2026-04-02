@@ -2,7 +2,7 @@
 
 基于 [chonk-ai](https://github.com/chonk-dev/chonk-ai) 构建的通用 Agent 运行时库。
 
-[![Go Version](https://img.shields.io/badge/go-1.23+-blue.svg)](https://go.dev)
+[![Go Version](https://img.shields.io/badge/go-1.26+-blue.svg)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **[English](README.md)**
@@ -25,7 +25,7 @@
 go get github.com/chonk-dev/chonk-agent/agent
 ```
 
-**依赖**: Go 1.23+，[chonk-ai](https://github.com/chonk-dev/chonk-ai)
+**依赖**: Go 1.26+，[chonk-ai](https://github.com/chonk-dev/chonk-ai)
 
 ---
 
