@@ -173,10 +173,7 @@ func executeToolCallsParallel(
 	var wg sync.WaitGroup
 
 	for i, tc := range toolCalls {
-		wg.Add(1)
-		go func(idx int, tc chonkai.ToolCall) {
-			defer wg.Done()
-
+		wg.Go(func() {
 			// 查找工具
 			var foundTool *Tool
 			for _, tool := range config.Tools {
@@ -186,7 +183,7 @@ func executeToolCallsParallel(
 				}
 			}
 			if foundTool == nil {
-				results[idx] = createErrorToolResult(tc.ID, tc.Name, "Tool not found: "+tc.Name)
+				results[i] = createErrorToolResult(tc.ID, tc.Name, "Tool not found: "+tc.Name)
 				emitToolEnd(stream, tc.ID, tc.Name, true)
 				return
 			}
@@ -204,7 +201,7 @@ func executeToolCallsParallel(
 				var err error
 				args, err = foundTool.PrepareArguments(args)
 				if err != nil {
-					results[idx] = createErrorToolResult(tc.ID, tc.Name, "PrepareArguments error: "+err.Error())
+					results[i] = createErrorToolResult(tc.ID, tc.Name, "PrepareArguments error: "+err.Error())
 					emitToolEnd(stream, tc.ID, tc.Name, true)
 					return
 				}
@@ -218,7 +215,7 @@ func executeToolCallsParallel(
 					Args:             args,
 				})
 				if err != nil {
-					results[idx] = createErrorToolResult(tc.ID, tc.Name, "BeforeToolCall error: "+err.Error())
+					results[i] = createErrorToolResult(tc.ID, tc.Name, "BeforeToolCall error: "+err.Error())
 					emitToolEnd(stream, tc.ID, tc.Name, true)
 					return
 				}
@@ -227,7 +224,7 @@ func executeToolCallsParallel(
 					if reason == "" {
 						reason = "Tool execution was blocked by beforeToolCall hook"
 					}
-					results[idx] = createErrorToolResult(tc.ID, tc.Name, reason)
+					results[i] = createErrorToolResult(tc.ID, tc.Name, reason)
 					emitToolEnd(stream, tc.ID, tc.Name, true)
 					return
 				}
@@ -244,7 +241,7 @@ func executeToolCallsParallel(
 			})
 
 			if err != nil {
-				results[idx] = createErrorToolResult(tc.ID, tc.Name, "Tool execution error: "+err.Error())
+				results[i] = createErrorToolResult(tc.ID, tc.Name, "Tool execution error: "+err.Error())
 				emitToolEnd(stream, tc.ID, tc.Name, true)
 				return
 			}
@@ -272,7 +269,7 @@ func executeToolCallsParallel(
 				}
 			}
 
-			results[idx] = chonkai.ToolResultMessage{
+			results[i] = chonkai.ToolResultMessage{
 				ToolCallID: tc.ID,
 				ToolName:   tc.Name,
 				Content:    toolResult.Content,
@@ -280,7 +277,7 @@ func executeToolCallsParallel(
 				Timestamp:  time.Now(),
 			}
 			emitToolEnd(stream, tc.ID, tc.Name, isError)
-		}(i, tc)
+		})
 	}
 
 	wg.Wait()

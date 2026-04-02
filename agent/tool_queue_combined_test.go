@@ -128,7 +128,7 @@ func TestAgentToolWithFollowUp(t *testing.T) {
 		agent.WithAfterToolCall(func(ctx context.Context, actx agent.AfterToolCallContext) (*agent.AfterToolCallResult, error) {
 			afterToolCallCalled = true
 			t.Logf("afterToolCall called for tool: %s", actx.ToolCall.Name)
-			
+
 			resultModified = true
 			return &agent.AfterToolCallResult{
 				Content: []chonkai.UserContent{

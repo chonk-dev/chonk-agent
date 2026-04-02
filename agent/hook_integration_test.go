@@ -324,9 +324,9 @@ func TestAgentAfterToolCallAudit(t *testing.T) {
 				"auditedAt": time.Now().Unix(),
 			}
 			auditTrail = append(auditTrail, auditEntry)
-			
+
 			t.Logf("Audit entry added: %v", auditEntry)
-			
+
 			return &agent.AfterToolCallResult{
 				Details: map[string]any{
 					"original": actx.Result.Details,
