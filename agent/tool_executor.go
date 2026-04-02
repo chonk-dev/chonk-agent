@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"time"
 
 	chonkai "github.com/chonk-dev/chonk-ai"
@@ -160,7 +161,7 @@ func executeToolCallsSequential(
 	return results, nil
 }
 
-// executeToolCallsParallel 并行执行工具（简化版，暂不支持钩子）
+// executeToolCallsParallel 并行执行工具
 func executeToolCallsParallel(
 	ctx context.Context,
 	assistant *AssistantMessage,
@@ -168,8 +169,122 @@ func executeToolCallsParallel(
 	config LoopConfig,
 	stream *AgentEventStream,
 ) ([]chonkai.ToolResultMessage, error) {
-	// 简化实现：顺序执行
-	return executeToolCallsSequential(ctx, assistant, toolCalls, config, stream)
+	results := make([]chonkai.ToolResultMessage, len(toolCalls))
+	var wg sync.WaitGroup
+
+	for i, tc := range toolCalls {
+		wg.Add(1)
+		go func(idx int, tc chonkai.ToolCall) {
+			defer wg.Done()
+
+			// 查找工具
+			var foundTool *Tool
+			for _, tool := range config.Tools {
+				if tool.Name == tc.Name {
+					foundTool = &tool
+					break
+				}
+			}
+			if foundTool == nil {
+				results[idx] = createErrorToolResult(tc.ID, tc.Name, "Tool not found: "+tc.Name)
+				emitToolEnd(stream, tc.ID, tc.Name, true)
+				return
+			}
+
+			// 解析参数
+			args := parseToolArgs(tc.Arguments)
+
+			stream.Push(AgentEvent{
+				Type:       EventToolExecutionStart,
+				ToolCallID: tc.ID,
+				ToolName:   tc.Name,
+				ToolArgs:   args,
+			})
+			if foundTool.PrepareArguments != nil {
+				var err error
+				args, err = foundTool.PrepareArguments(args)
+				if err != nil {
+					results[idx] = createErrorToolResult(tc.ID, tc.Name, "PrepareArguments error: "+err.Error())
+					emitToolEnd(stream, tc.ID, tc.Name, true)
+					return
+				}
+			}
+
+			// beforeToolCall 钩子
+			if config.BeforeToolCall != nil {
+				beforeResult, err := config.BeforeToolCall(ctx, BeforeToolCallContext{
+					AssistantMessage: *assistant,
+					ToolCall:         tc,
+					Args:             args,
+				})
+				if err != nil {
+					results[idx] = createErrorToolResult(tc.ID, tc.Name, "BeforeToolCall error: "+err.Error())
+					emitToolEnd(stream, tc.ID, tc.Name, true)
+					return
+				}
+				if beforeResult != nil && beforeResult.Block {
+					reason := beforeResult.Reason
+					if reason == "" {
+						reason = "Tool execution was blocked by beforeToolCall hook"
+					}
+					results[idx] = createErrorToolResult(tc.ID, tc.Name, reason)
+					emitToolEnd(stream, tc.ID, tc.Name, true)
+					return
+				}
+			}
+
+			// 执行工具
+			toolResult, err := foundTool.Execute(ctx, tc.ID, args, func(partial ToolResult) {
+				stream.Push(AgentEvent{
+					Type:       EventToolExecutionUpdate,
+					ToolCallID: tc.ID,
+					ToolName:   tc.Name,
+					ToolResult: &partial,
+				})
+			})
+
+			if err != nil {
+				results[idx] = createErrorToolResult(tc.ID, tc.Name, "Tool execution error: "+err.Error())
+				emitToolEnd(stream, tc.ID, tc.Name, true)
+				return
+			}
+
+			// afterToolCall 钩子
+			isError := false
+			if config.AfterToolCall != nil {
+				afterResult, err := config.AfterToolCall(ctx, AfterToolCallContext{
+					AssistantMessage: *assistant,
+					ToolCall:         tc,
+					Args:             args,
+					Result:           toolResult,
+					IsError:          isError,
+				})
+				if err == nil && afterResult != nil {
+					if afterResult.Content != nil {
+						toolResult.Content = afterResult.Content
+					}
+					if afterResult.Details != nil {
+						toolResult.Details = afterResult.Details
+					}
+					if afterResult.IsError != nil {
+						isError = *afterResult.IsError
+					}
+				}
+			}
+
+			results[idx] = chonkai.ToolResultMessage{
+				ToolCallID: tc.ID,
+				ToolName:   tc.Name,
+				Content:    toolResult.Content,
+				IsError:    isError,
+				Timestamp:  time.Now(),
+			}
+			emitToolEnd(stream, tc.ID, tc.Name, isError)
+		}(i, tc)
+	}
+
+	wg.Wait()
+	return results, nil
 }
 
 // parseToolArgs 解析工具参数

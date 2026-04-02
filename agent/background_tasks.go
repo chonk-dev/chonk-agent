@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
 	"sync"
 	"time"
 )
@@ -142,7 +143,9 @@ func randomString(n int) string {
 	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)
 	for i := range b {
-		b[i] = letters[time.Now().UnixNano()%int64(len(letters))]
+		idx := make([]byte, 1)
+		rand.Read(idx)
+		b[i] = letters[int(idx[0])%len(letters)]
 	}
 	return string(b)
 }

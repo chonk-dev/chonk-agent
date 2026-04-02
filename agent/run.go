@@ -24,11 +24,22 @@ func (a *Agent) Prompt(ctx context.Context, messages ...AgentMessage) error {
 
 	defer func() {
 		a.mu.Lock()
+		if a.activeRun != nil {
+			close(a.activeRun.done)
+		}
 		a.activeRun = nil
 		a.mu.Unlock()
 	}()
 
-	return a.runPrompt(runCtx, messages)
+	err := a.runPrompt(runCtx, messages)
+
+	a.mu.Lock()
+	if a.activeRun != nil {
+		a.activeRun.err = err
+	}
+	a.mu.Unlock()
+
+	return err
 }
 
 // Continue 从现有上下文继续
@@ -61,9 +72,33 @@ func (a *Agent) Continue(ctx context.Context) error {
 		a.mu.Unlock()
 		return ErrCannotContinueFromAssistant
 	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	a.activeRun = &activeRun{
+		ctx:    runCtx,
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
 	a.mu.Unlock()
 
-	return a.runContinuation(ctx)
+	defer func() {
+		a.mu.Lock()
+		if a.activeRun != nil {
+			close(a.activeRun.done)
+		}
+		a.activeRun = nil
+		a.mu.Unlock()
+	}()
+
+	err := a.runContinuation(runCtx)
+
+	a.mu.Lock()
+	if a.activeRun != nil {
+		a.activeRun.err = err
+	}
+	a.mu.Unlock()
+
+	return err
 }
 
 // Abort 中止当前运行

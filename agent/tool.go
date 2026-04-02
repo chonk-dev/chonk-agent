@@ -23,9 +23,12 @@ func WithSchema[T any]() ToolOption {
 	return func(t *Tool) {
 		schema, err := jsonschema.For[T](nil)
 		if err != nil {
-			return
+			panic("failed to generate JSON schema for tool " + t.Name + ": " + err.Error())
 		}
-		data, _ := json.Marshal(schema)
+		data, err := json.Marshal(schema)
+		if err != nil {
+			panic("failed to marshal JSON schema for tool " + t.Name + ": " + err.Error())
+		}
 		t.Parameters = json.RawMessage(data)
 	}
 }

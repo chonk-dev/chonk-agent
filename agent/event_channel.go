@@ -21,7 +21,7 @@ func NewEventChannel(bufSize int) *EventChannel {
 	}
 }
 
-// Send 发送事件（非阻塞）
+// Send 发送事件（阻塞直到发送成功或 channel 关闭）
 func (ec *EventChannel) Send(event AgentEvent) bool {
 	ec.mu.RLock()
 	defer ec.mu.RUnlock()
@@ -35,9 +35,6 @@ func (ec *EventChannel) Send(event AgentEvent) bool {
 		return true
 	case <-ec.done:
 		return false
-	default:
-		// channel 满，丢弃（避免阻塞生产者）
-		return true
 	}
 }
 
