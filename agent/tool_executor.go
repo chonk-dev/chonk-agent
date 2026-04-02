@@ -23,7 +23,174 @@ func executeToolCalls(
 	return executeToolCallsParallel(ctx, assistant, toolCalls, config, stream)
 }
 
-// executeToolCallsSequential 顺序执行工具（带钩子支持）
+// preparedCall 工具准备阶段的成功结果
+type preparedCall struct {
+	tc   chonkai.ToolCall
+	tool *Tool
+	args map[string]any
+}
+
+// prepareToolCall 准备阶段：解析参数 → 查找工具 → 预处理 → 验证 → 权限 → beforeHook
+// 返回 (prepared, nil) 或 (_, &errorResult)。
+// 调用方负责：在收到 errorResult 时 EventToolExecutionEnd 已由本函数发出，无需重复。
+func prepareToolCall(
+	ctx context.Context,
+	assistant *AssistantMessage,
+	tc chonkai.ToolCall,
+	config LoopConfig,
+	stream *AgentEventStream,
+) (preparedCall, *chonkai.ToolResultMessage) {
+	// 解析参数（只解析一次，结果用于 start 事件和后续步骤）
+	args, parseErr := parseToolArgs(tc.Arguments)
+
+	stream.Push(AgentEvent{
+		Type:       EventToolExecutionStart,
+		ToolCallID: tc.ID,
+		ToolName:   tc.Name,
+		ToolArgs:   args,
+	})
+
+	if parseErr != nil {
+		return fail(tc, "Invalid tool arguments: "+parseErr.Error(), stream)
+	}
+
+	// 查找工具（通过索引取指针，避免 loop-variable 逃逸）
+	var foundTool *Tool
+	for i := range config.Tools {
+		if config.Tools[i].Name == tc.Name {
+			foundTool = &config.Tools[i]
+			break
+		}
+	}
+	if foundTool == nil {
+		return fail(tc, "Tool not found: "+tc.Name, stream)
+	}
+
+	// 参数预处理
+	if foundTool.PrepareArguments != nil {
+		var err error
+		args, err = foundTool.PrepareArguments(args)
+		if err != nil {
+			return fail(tc, "Argument preparation error: "+err.Error(), stream)
+		}
+	}
+
+	// 输入验证
+	if foundTool.ValidateInput != nil {
+		if err := foundTool.ValidateInput(ctx, args); err != nil {
+			return fail(tc, "Validation error: "+err.Error(), stream)
+		}
+	}
+
+	// 权限检查
+	if foundTool.CheckPermission != nil {
+		perm, err := foundTool.CheckPermission(ctx, args)
+		if err != nil {
+			return fail(tc, "Permission check error: "+err.Error(), stream)
+		}
+		if !perm.Allowed {
+			reason := perm.Reason
+			if reason == "" {
+				reason = "Tool execution not permitted"
+			}
+			return fail(tc, reason, stream)
+		}
+	}
+
+	// beforeToolCall 钩子
+	if config.BeforeToolCall != nil {
+		beforeResult, err := config.BeforeToolCall(ctx, BeforeToolCallContext{
+			AssistantMessage: *assistant,
+			ToolCall:         tc,
+			Args:             args,
+		})
+		if err != nil {
+			return fail(tc, "BeforeToolCall error: "+err.Error(), stream)
+		}
+		if beforeResult != nil && beforeResult.Block {
+			reason := beforeResult.Reason
+			if reason == "" {
+				reason = "Tool execution was blocked by beforeToolCall hook"
+			}
+			return fail(tc, reason, stream)
+		}
+	}
+
+	return preparedCall{tc: tc, tool: foundTool, args: args}, nil
+}
+
+// runAndFinalizeToolCall 执行阶段 + 后处理：execute → 填充 Meta → afterHook → 构建结果
+func runAndFinalizeToolCall(
+	ctx context.Context,
+	assistant *AssistantMessage,
+	p preparedCall,
+	config LoopConfig,
+	stream *AgentEventStream,
+) chonkai.ToolResultMessage {
+	tc, tool, args := p.tc, p.tool, p.args
+
+	// 执行工具
+	toolResult, execErr := tool.Execute(ctx, tc.ID, args, func(partial ToolResult) {
+		stream.Push(AgentEvent{
+			Type:       EventToolExecutionUpdate,
+			ToolCallID: tc.ID,
+			ToolName:   tc.Name,
+			ToolResult: &partial,
+		})
+	})
+
+	if execErr != nil {
+		r := createErrorToolResult(tc.ID, tc.Name, "Tool execution error: "+execErr.Error())
+		emitToolEnd(stream, tc.ID, tc.Name, true)
+		return r
+	}
+
+	// 填充 Meta 字段
+	if tool.GetActivityDesc != nil {
+		toolResult.Meta.ActivityDesc = tool.GetActivityDesc(args)
+	}
+	if tool.GetSummary != nil {
+		toolResult.Meta.Summary = tool.GetSummary(args)
+	}
+	if tool.IsResultTruncated != nil {
+		toolResult.Meta.IsTruncated = tool.IsResultTruncated(toolResult)
+	}
+
+	// afterToolCall 钩子
+	isError := false
+	if config.AfterToolCall != nil {
+		afterResult, err := config.AfterToolCall(ctx, AfterToolCallContext{
+			AssistantMessage: *assistant,
+			ToolCall:         tc,
+			Args:             args,
+			Result:           toolResult,
+			IsError:          isError,
+		})
+		if err == nil && afterResult != nil {
+			if afterResult.Content != nil {
+				toolResult.Content = afterResult.Content
+			}
+			if afterResult.Details != nil {
+				toolResult.Details = afterResult.Details
+			}
+			if afterResult.IsError != nil {
+				isError = *afterResult.IsError
+			}
+		}
+	}
+
+	r := chonkai.ToolResultMessage{
+		ToolCallID: tc.ID,
+		ToolName:   tc.Name,
+		Content:    toolResult.Content,
+		IsError:    isError,
+		Timestamp:  time.Now(),
+	}
+	emitToolEnd(stream, tc.ID, tc.Name, isError)
+	return r
+}
+
+// executeToolCallsSequential 顺序执行工具
 func executeToolCallsSequential(
 	ctx context.Context,
 	assistant *AssistantMessage,
@@ -32,139 +199,14 @@ func executeToolCallsSequential(
 	stream *AgentEventStream,
 ) ([]chonkai.ToolResultMessage, error) {
 	results := make([]chonkai.ToolResultMessage, 0, len(toolCalls))
-
 	for _, tc := range toolCalls {
-		// 解析工具参数（只解析一次）
-		args, parseErr := parseToolArgs(tc.Arguments)
-
-		stream.Push(AgentEvent{
-			Type:       EventToolExecutionStart,
-			ToolCallID: tc.ID,
-			ToolName:   tc.Name,
-			ToolArgs:   args,
-		})
-
-		if parseErr != nil {
-			result := createErrorToolResult(tc.ID, tc.Name, "Invalid tool arguments: "+parseErr.Error())
-			results = append(results, result)
-			emitToolEnd(stream, tc.ID, tc.Name, true)
+		prepared, errResult := prepareToolCall(ctx, assistant, tc, config, stream)
+		if errResult != nil {
+			results = append(results, *errResult)
 			continue
 		}
-
-		// 查找工具定义
-		var foundTool *Tool
-		for _, t := range config.Tools {
-			if t.Name == tc.Name {
-				foundTool = &t
-				break
-			}
-		}
-
-		if foundTool == nil {
-			result := createErrorToolResult(tc.ID, tc.Name, "Tool not found: "+tc.Name)
-			results = append(results, result)
-			emitToolEnd(stream, tc.ID, tc.Name, result.IsError)
-			continue
-		}
-
-		// 工具参数预处理
-		if foundTool.PrepareArguments != nil {
-			var err error
-			args, err = foundTool.PrepareArguments(args)
-			if err != nil {
-				result := createErrorToolResult(tc.ID, tc.Name, "Argument preparation error: "+err.Error())
-				results = append(results, result)
-				emitToolEnd(stream, tc.ID, tc.Name, result.IsError)
-				continue
-			}
-		}
-
-		// 输入验证
-		if foundTool.ValidateInput != nil {
-			if err := foundTool.ValidateInput(ctx, args); err != nil {
-				result := createErrorToolResult(tc.ID, tc.Name, "Validation error: "+err.Error())
-				results = append(results, result)
-				emitToolEnd(stream, tc.ID, tc.Name, result.IsError)
-				continue
-			}
-		}
-
-		// beforeToolCall 钩子
-		if config.BeforeToolCall != nil {
-			beforeResult, err := config.BeforeToolCall(ctx, BeforeToolCallContext{
-				AssistantMessage: *assistant,
-				ToolCall:         tc,
-				Args:             args,
-			})
-			if err != nil {
-				result := createErrorToolResult(tc.ID, tc.Name, "BeforeToolCall error: "+err.Error())
-				results = append(results, result)
-				emitToolEnd(stream, tc.ID, tc.Name, result.IsError)
-				continue
-			}
-			if beforeResult != nil && beforeResult.Block {
-				reason := beforeResult.Reason
-				if reason == "" {
-					reason = "Tool execution was blocked by beforeToolCall hook"
-				}
-				result := createErrorToolResult(tc.ID, tc.Name, reason)
-				results = append(results, result)
-				emitToolEnd(stream, tc.ID, tc.Name, result.IsError)
-				continue
-			}
-		}
-
-		// 执行工具
-		toolResult, err := foundTool.Execute(ctx, tc.ID, args, func(partial ToolResult) {
-			stream.Push(AgentEvent{
-				Type:       EventToolExecutionUpdate,
-				ToolCallID: tc.ID,
-				ToolName:   tc.Name,
-				ToolResult: &partial,
-			})
-		})
-
-		if err != nil {
-			result := createErrorToolResult(tc.ID, tc.Name, "Tool execution error: "+err.Error())
-			results = append(results, result)
-			emitToolEnd(stream, tc.ID, tc.Name, true)
-			continue
-		}
-
-		// afterToolCall 钩子
-		isError := false
-		if config.AfterToolCall != nil {
-			afterResult, err := config.AfterToolCall(ctx, AfterToolCallContext{
-				AssistantMessage: *assistant,
-				ToolCall:         tc,
-				Args:             args,
-				Result:           toolResult,
-				IsError:          isError,
-			})
-			if err == nil && afterResult != nil {
-				if afterResult.Content != nil {
-					toolResult.Content = afterResult.Content
-				}
-				if afterResult.Details != nil {
-					toolResult.Details = afterResult.Details
-				}
-				if afterResult.IsError != nil {
-					isError = *afterResult.IsError
-				}
-			}
-		}
-
-		result := chonkai.ToolResultMessage{
-			ToolCallID: tc.ID,
-			ToolName:   tc.Name,
-			Content:    toolResult.Content,
-			IsError:    isError,
-			Timestamp:  time.Now(),
-		}
-		results = append(results, result)
-		emitToolEnd(stream, tc.ID, tc.Name, isError)
+		results = append(results, runAndFinalizeToolCall(ctx, assistant, prepared, config, stream))
 	}
-
 	return results, nil
 }
 
@@ -181,120 +223,24 @@ func executeToolCallsParallel(
 
 	for i, tc := range toolCalls {
 		wg.Go(func() {
-			// 查找工具
-			var foundTool *Tool
-			for _, tool := range config.Tools {
-				if tool.Name == tc.Name {
-					foundTool = &tool
-					break
-				}
-			}
-			if foundTool == nil {
-				results[i] = createErrorToolResult(tc.ID, tc.Name, "Tool not found: "+tc.Name)
-				emitToolEnd(stream, tc.ID, tc.Name, true)
+			prepared, errResult := prepareToolCall(ctx, assistant, tc, config, stream)
+			if errResult != nil {
+				results[i] = *errResult
 				return
 			}
-
-			// 解析参数
-			args, parseErr := parseToolArgs(tc.Arguments)
-
-			stream.Push(AgentEvent{
-				Type:       EventToolExecutionStart,
-				ToolCallID: tc.ID,
-				ToolName:   tc.Name,
-				ToolArgs:   args,
-			})
-
-			if parseErr != nil {
-				results[i] = createErrorToolResult(tc.ID, tc.Name, "Invalid tool arguments: "+parseErr.Error())
-				emitToolEnd(stream, tc.ID, tc.Name, true)
-				return
-			}
-			if foundTool.PrepareArguments != nil {
-				var err error
-				args, err = foundTool.PrepareArguments(args)
-				if err != nil {
-					results[i] = createErrorToolResult(tc.ID, tc.Name, "PrepareArguments error: "+err.Error())
-					emitToolEnd(stream, tc.ID, tc.Name, true)
-					return
-				}
-			}
-
-			// beforeToolCall 钩子
-			if config.BeforeToolCall != nil {
-				beforeResult, err := config.BeforeToolCall(ctx, BeforeToolCallContext{
-					AssistantMessage: *assistant,
-					ToolCall:         tc,
-					Args:             args,
-				})
-				if err != nil {
-					results[i] = createErrorToolResult(tc.ID, tc.Name, "BeforeToolCall error: "+err.Error())
-					emitToolEnd(stream, tc.ID, tc.Name, true)
-					return
-				}
-				if beforeResult != nil && beforeResult.Block {
-					reason := beforeResult.Reason
-					if reason == "" {
-						reason = "Tool execution was blocked by beforeToolCall hook"
-					}
-					results[i] = createErrorToolResult(tc.ID, tc.Name, reason)
-					emitToolEnd(stream, tc.ID, tc.Name, true)
-					return
-				}
-			}
-
-			// 执行工具
-			toolResult, err := foundTool.Execute(ctx, tc.ID, args, func(partial ToolResult) {
-				stream.Push(AgentEvent{
-					Type:       EventToolExecutionUpdate,
-					ToolCallID: tc.ID,
-					ToolName:   tc.Name,
-					ToolResult: &partial,
-				})
-			})
-
-			if err != nil {
-				results[i] = createErrorToolResult(tc.ID, tc.Name, "Tool execution error: "+err.Error())
-				emitToolEnd(stream, tc.ID, tc.Name, true)
-				return
-			}
-
-			// afterToolCall 钩子
-			isError := false
-			if config.AfterToolCall != nil {
-				afterResult, err := config.AfterToolCall(ctx, AfterToolCallContext{
-					AssistantMessage: *assistant,
-					ToolCall:         tc,
-					Args:             args,
-					Result:           toolResult,
-					IsError:          isError,
-				})
-				if err == nil && afterResult != nil {
-					if afterResult.Content != nil {
-						toolResult.Content = afterResult.Content
-					}
-					if afterResult.Details != nil {
-						toolResult.Details = afterResult.Details
-					}
-					if afterResult.IsError != nil {
-						isError = *afterResult.IsError
-					}
-				}
-			}
-
-			results[i] = chonkai.ToolResultMessage{
-				ToolCallID: tc.ID,
-				ToolName:   tc.Name,
-				Content:    toolResult.Content,
-				IsError:    isError,
-				Timestamp:  time.Now(),
-			}
-			emitToolEnd(stream, tc.ID, tc.Name, isError)
+			results[i] = runAndFinalizeToolCall(ctx, assistant, prepared, config, stream)
 		})
 	}
 
 	wg.Wait()
 	return results, nil
+}
+
+// fail 创建错误结果并发出 end 事件，供 prepareToolCall 内部使用
+func fail(tc chonkai.ToolCall, msg string, stream *AgentEventStream) (preparedCall, *chonkai.ToolResultMessage) {
+	r := createErrorToolResult(tc.ID, tc.Name, msg)
+	emitToolEnd(stream, tc.ID, tc.Name, true)
+	return preparedCall{}, &r
 }
 
 // parseToolArgs 解析工具参数

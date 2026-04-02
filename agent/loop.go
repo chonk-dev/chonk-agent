@@ -258,7 +258,15 @@ func streamAssistantResponse(
 	context *AgentContext,
 	config LoopConfig,
 	stream *AgentEventStream,
-) (AgentMessage, error) {
+) (msg AgentMessage, err error) {
+	// 记录起始长度：若中途出错，defer 会将 context.Messages 还原到调用前的状态，
+	// 避免残留 partial/error 消息污染后续轮次的上下文快照。
+	savedLen := len(context.Messages)
+	defer func() {
+		if err != nil {
+			context.Messages = context.Messages[:savedLen]
+		}
+	}()
 	// 转换为 LLM 消息（直接使用 context.Messages，确保读取最新数据）
 	var llmMessages []chonkai.Message
 	if config.ConvertToLlm != nil {
