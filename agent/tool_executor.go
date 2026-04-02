@@ -34,15 +34,22 @@ func executeToolCallsSequential(
 	results := make([]chonkai.ToolResultMessage, 0, len(toolCalls))
 
 	for _, tc := range toolCalls {
+		// 解析工具参数（只解析一次）
+		args, parseErr := parseToolArgs(tc.Arguments)
+
 		stream.Push(AgentEvent{
 			Type:       EventToolExecutionStart,
 			ToolCallID: tc.ID,
 			ToolName:   tc.Name,
-			ToolArgs:   parseToolArgs(tc.Arguments),
+			ToolArgs:   args,
 		})
 
-		// 解析工具参数
-		args := parseToolArgs(tc.Arguments)
+		if parseErr != nil {
+			result := createErrorToolResult(tc.ID, tc.Name, "Invalid tool arguments: "+parseErr.Error())
+			results = append(results, result)
+			emitToolEnd(stream, tc.ID, tc.Name, true)
+			continue
+		}
 
 		// 查找工具定义
 		var foundTool *Tool
@@ -189,7 +196,7 @@ func executeToolCallsParallel(
 			}
 
 			// 解析参数
-			args := parseToolArgs(tc.Arguments)
+			args, parseErr := parseToolArgs(tc.Arguments)
 
 			stream.Push(AgentEvent{
 				Type:       EventToolExecutionStart,
@@ -197,6 +204,12 @@ func executeToolCallsParallel(
 				ToolName:   tc.Name,
 				ToolArgs:   args,
 			})
+
+			if parseErr != nil {
+				results[i] = createErrorToolResult(tc.ID, tc.Name, "Invalid tool arguments: "+parseErr.Error())
+				emitToolEnd(stream, tc.ID, tc.Name, true)
+				return
+			}
 			if foundTool.PrepareArguments != nil {
 				var err error
 				args, err = foundTool.PrepareArguments(args)
@@ -285,15 +298,15 @@ func executeToolCallsParallel(
 }
 
 // parseToolArgs 解析工具参数
-func parseToolArgs(raw json.RawMessage) map[string]any {
+func parseToolArgs(raw json.RawMessage) (map[string]any, error) {
 	if len(raw) == 0 {
-		return make(map[string]any)
+		return make(map[string]any), nil
 	}
 	var args map[string]any
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return make(map[string]any)
+		return nil, err
 	}
-	return args
+	return args, nil
 }
 
 // createErrorToolResult 创建错误工具结果

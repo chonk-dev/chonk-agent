@@ -30,12 +30,11 @@ type Agent struct {
 	ToolExecution   ToolExecutionMode
 
 	// 内部字段
-	mu              sync.RWMutex
-	steeringQueue   *MessageQueue
-	followUpQueue   *MessageQueue
-	listeners       []*EventChannel
-	activeRun       *activeRun
-	backgroundTasks *BackgroundTaskManager
+	mu            sync.RWMutex
+	steeringQueue *MessageQueue
+	followUpQueue *MessageQueue
+	listeners     []*EventChannel
+	activeRun     *activeRun
 }
 
 // AgentState Agent 公共状态
@@ -67,9 +66,8 @@ func NewAgent(opts ...AgentOption) *Agent {
 			Messages:          make([]AgentMessage, 0),
 			InProgressToolIDs: make(map[string]struct{}),
 		},
-		steeringQueue:   NewMessageQueue(ModeOneAtATime),
-		followUpQueue:   NewMessageQueue(ModeOneAtATime),
-		backgroundTasks: NewBackgroundTaskManager(),
+		steeringQueue: NewMessageQueue(ModeOneAtATime),
+		followUpQueue: NewMessageQueue(ModeOneAtATime),
 	}
 
 	// 默认配置

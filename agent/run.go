@@ -270,7 +270,7 @@ func (a *Agent) emit(event AgentEvent) {
 	}
 }
 
-// Subscribe 订阅事件
+// Subscribe 订阅事件，返回 EventChannel。使用完毕后调用 Unsubscribe 释放资源。
 func (a *Agent) Subscribe() *EventChannel {
 	ec := NewEventChannel(64)
 
@@ -279,6 +279,20 @@ func (a *Agent) Subscribe() *EventChannel {
 	a.mu.Unlock()
 
 	return ec
+}
+
+// Unsubscribe 取消订阅并关闭对应的 EventChannel
+func (a *Agent) Unsubscribe(ec *EventChannel) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	for i, l := range a.listeners {
+		if l == ec {
+			a.listeners = append(a.listeners[:i], a.listeners[i+1:]...)
+			ec.Close()
+			return
+		}
+	}
 }
 
 // Steer 注入转向消息
