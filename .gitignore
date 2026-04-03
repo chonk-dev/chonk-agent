@@ -3,5 +3,6 @@
 
 # Markdown files (except README files)
 *.md
+!docs/*
 !README.md
 !README_zh.md
