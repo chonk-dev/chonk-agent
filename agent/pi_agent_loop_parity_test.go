@@ -13,13 +13,11 @@ type notificationMessage struct {
 	Text string
 }
 
-func (notificationMessage) messageMarker() {}
-
 type customMessage struct {
 	Text string
 }
 
-func (customMessage) messageMarker() {}
+
 
 func TestAgentLoopEmitsEvents(t *testing.T) {
 	agentContext := agent.AgentContext{
